@@ -585,8 +585,8 @@
 
 <main>
 
-  <!-- ── Config Panel ──────────────────────── -->
-  <div id="config-panel">
+  <!-- ── Config Panel (하드코딩으로 비활성화) ──────────────────────── -->
+  <div id="config-panel" style="display:none">
     <h3>⚙️ Google Sheets 연결 설정</h3>
     <div class="config-row">
       <label>시트 ID:</label>
@@ -603,8 +603,8 @@
 
   <!-- ── Error Banner ──────────────────────── -->
   <div id="error-banner">
-    ⚠️ 구글 시트 데이터를 불러오지 못했습니다. 샘플 데이터로 표시됩니다.
-    시트가 공개 설정되어 있는지 확인하세요.
+    ⚠️ 구글 시트 데이터를 불러오지 못했습니다. 샘플 데이터로 표시됩니다.<br>
+    <span id="error-detail" style="font-size:11px; opacity:0.8;"></span>
   </div>
 
   <!-- ── KPI Section ───────────────────────── -->
@@ -783,9 +783,9 @@
 
 <script>
 // ─────────────────────────────────────────────
-//  CONFIG — 구글 시트 ID를 여기에 입력하세요
+//  CONFIG — 구글 시트 ID (하드코딩)
 // ─────────────────────────────────────────────
-let SHEET_ID = localStorage.getItem('icok_sheet_id') || '';
+const SHEET_ID = '1lI3P3-_pV5ugXEsbQG91ykyoNKQdutWy6q5okgFxLZA';
 
 const SECTOR_COLORS = [
   '#c8a96e','#4fa3e0','#3dd68c','#a78bfa','#fb7185',
@@ -821,18 +821,50 @@ const SAMPLE = {
 };
 
 // ─────────────────────────────────────────────
-//  GViz FETCH HELPER
+//  CSV → GViz 호환 테이블 변환
 // ─────────────────────────────────────────────
+function csvToTable(csvText) {
+  const lines = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const parseCSVLine = line => {
+    const cells = []; let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQ && line[i+1] === '"') { cur += '"'; i++; }
+        else inQ = !inQ;
+      } else if (ch === ',' && !inQ) { cells.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    cells.push(cur);
+    return cells;
+  };
+  const rows = lines
+    .map(parseCSVLine)
+    .filter(r => r.some(c => c.trim() !== ''));
+  if (!rows.length) return { rows: [] };
+  return {
+    rows: rows.map(cells => ({
+      c: cells.map(val => {
+        const t = val.trim();
+        if (t === '') return { v: null };
+        const n = Number(t.replace(/,/g, '').replace(/%$/, ''));
+        return isNaN(n) ? { v: t } : { v: n, f: val };
+      })
+    }))
+  };
+}
+
+// ─────────────────────────────────────────────
+//  CSV FETCH HELPER (웹에 게시된 URL 사용)
+// ─────────────────────────────────────────────
+const PUBLISHED_ID = '2PACX-1vQsab1qIcQKbLB1JakqqhnhBS6a2GVQCBqd_xljS9wyje774jCEYei5XgMxdBUyk0BcZwUt09MpKR0n';
+
 async function fetchSheet(sheetName) {
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`;
+  const url = `https://docs.google.com/spreadsheets/d/e/${PUBLISHED_ID}/pub?output=csv&sheet=${encodeURIComponent(sheetName)}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const text = await res.text();
-  // Strip JSONP wrapper: /*O_o*/\ngoogle.visualization.Query.setResponse({...});
-  const jsonStr = text.replace(/^[^{]*/, '').replace(/\);?\s*$/, '');
-  const json = JSON.parse(jsonStr);
-  if (json.status === 'error') throw new Error(json.errors?.[0]?.message || 'Sheet error');
-  return json.table;
+  return csvToTable(text);
 }
 
 function cellVal(row, colIdx) {
@@ -1260,18 +1292,23 @@ async function loadData() {
   }
 
   try {
-    const [portTable, sectorTable, txTable] = await Promise.all([
-      fetchSheet('Portfolio'),
-      fetchSheet('Sector Summary'),
-      fetchSheet('Transaction Log'),
-    ]);
+    // 각 시트를 순서대로 fetch해서 어느 단계에서 실패하는지 파악
+    let portTable, sectorTable, txTable;
+
+    try { portTable    = await fetchSheet('Portfolio'); }
+    catch(e) { throw new Error('Portfolio 시트 오류: ' + e.message); }
+
+    try { sectorTable  = await fetchSheet('Sector Summary'); }
+    catch(e) { throw new Error('Sector Summary 시트 오류: ' + e.message); }
+
+    try { txTable      = await fetchSheet('Transaction Log'); }
+    catch(e) { throw new Error('Transaction Log 시트 오류: ' + e.message); }
 
     const portData   = parsePortfolio(portTable);
     const sectors    = parseSectors(sectorTable);
     const txData     = parseTx(txTable);
-    const computed   = computeFromSample(portData); // compute totals
+    const computed   = computeFromSample(portData);
 
-    // Override sectors with live data if available
     const liveSectors = sectors.length ? sectors : computed.sectors;
 
     renderKPIs(computed);
@@ -1287,6 +1324,7 @@ async function loadData() {
 
   } catch (err) {
     console.error('Sheet fetch error:', err);
+    document.getElementById('error-detail').textContent = err.message;
     showSampleData();
   }
 }
@@ -1319,10 +1357,6 @@ function applySheetId() {
 //  INIT
 // ─────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
-  // Restore saved sheet ID
-  if (SHEET_ID) {
-    document.getElementById('sheet-id-input').value = SHEET_ID;
-  }
   loadData();
 });
 </script>
