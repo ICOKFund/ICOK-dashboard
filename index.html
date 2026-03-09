@@ -391,6 +391,12 @@
     justify-content: center;
   }
 
+  /* ── NAV Chart ───────────────────────────── */
+  .nav-chart-container {
+    position: relative;
+    height: 320px;
+  }
+
   /* ── Sector Table ────────────────────────── */
   .sector-list { width: 100%; }
 
@@ -586,7 +592,7 @@
 <main>
 
   <!-- ── Config Panel ──────────────────────── -->
-  <div id="config-panel" style="display: none;">
+  <div id="config-panel">
     <h3>⚙️ Google Sheets 연결 설정</h3>
     <div class="config-row">
       <label>시트 ID:</label>
@@ -637,6 +643,19 @@
       <div class="kpi-label">USD/KRW 환율</div>
       <div class="kpi-value" id="kpi-fx">—</div>
       <div class="kpi-sub" id="kpi-cash">예수금 로딩 중</div>
+    </div>
+  </div>
+
+  <!-- ── NAV History Chart ────────────────── -->
+  <div class="section-title">
+    <h2>NAV 이력</h2>
+    <span class="tag">DAILY NAV</span>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-card-title">ICOK 좌당금액 추이 (2025년) · 12,206좌 기준</div>
+    <div class="nav-chart-container">
+      <canvas id="navChart"></canvas>
     </div>
   </div>
 
@@ -725,7 +744,7 @@
   <div class="two-col">
     <!-- Donut Chart -->
     <div class="chart-card">
-      <div class="chart-card-title">섹터별 비중 (도넛 차트)</div>
+      <div class="chart-card-title">섹터별 비중</div>
       <div class="chart-container">
         <canvas id="sectorChart"></canvas>
       </div>
@@ -762,13 +781,12 @@
             <th style="text-align:left;">구분</th>
             <th>수량</th>
             <th>단가</th>
-            <th>수수료</th>
             <th>총금액</th>
             <th style="text-align:left;">메모</th>
           </tr>
         </thead>
         <tbody id="tx-tbody">
-          <tr><td colspan="9" style="text-align:center; padding:24px; color:var(--muted);">로딩 중...</td></tr>
+          <tr><td colspan="8" style="text-align:center; padding:24px; color:var(--muted);">로딩 중...</td></tr>
         </tbody>
       </table>
     </div>
@@ -785,7 +803,7 @@
 // ─────────────────────────────────────────────
 //  CONFIG — 구글 시트 ID를 여기에 입력하세요
 // ─────────────────────────────────────────────
-let SHEET_ID = '1lI3P3-_pV5ugXEsbQG91ykyoNKQdutWy6q5okgFxLZA';
+let SHEET_ID = localStorage.getItem('icok_sheet_id') || '';
 
 const SECTOR_COLORS = [
   '#c8a96e','#4fa3e0','#3dd68c','#a78bfa','#fb7185',
@@ -801,7 +819,7 @@ const SAMPLE = {
   krCash: 11015756,
   usCash: 1093.3,
   krStocks: [
-    { name:'SK하이닉스',    ticker:'000660', sector:'테크',        qty:7,  avgPrice:607033, fee:14905, price:949000  },
+    { name:'SK하이닉스',    ticker:'000660', sector:'테크',        qty:4,  avgPrice:607033, fee:14905, price:949000  },
     { name:'삼성중공업',    ticker:'010140', sector:'조선 및 방산', qty:81, avgPrice:24769,  fee:5428,  price:29500   },
     { name:'로보티즈',      ticker:'108490', sector:'로봇',        qty:5,  avgPrice:220550, fee:3155,  price:279500  },
     { name:'효성티앤씨',    ticker:'298020', sector:'석유화학',    qty:7,  avgPrice:381500, fee:6318,  price:393500  },
@@ -817,6 +835,7 @@ const SAMPLE = {
     { date:'2025-01-22', name:'효성티앤씨',    ticker:'298020', type:'매수', qty:7,  price:381500, fee:6318,  total:2677818, memo:'석유화학' },
     { date:'2025-02-03', name:'알파벳 A',      ticker:'GOOGL',  type:'매수', qty:6,  price:300.09, fee:9.22,  total:1809.76, memo:'해외 편입' },
     { date:'2025-02-05', name:'마이크론 테크', ticker:'MU',     type:'매수', qty:2,  price:243.4,  fee:3.35,  total:490.15,  memo:'반도체' },
+    { date:'2025-02-25', name:'SK하이닉스',    ticker:'000660', type:'매도', qty:3,  price:866000, fee:9093,  total:2588907, memo:'일부 매도' },
   ]
 };
 
@@ -955,7 +974,7 @@ function parseSectors(table) {
 function parseTx(table) {
   const rows = table.rows;
   const txs = [];
-  for (let r = 2; r < rows.length; r++) {
+  for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
     if (!row?.c?.[0]?.v) continue;
     txs.push({
@@ -1056,6 +1075,123 @@ const fmt = {
 // ─────────────────────────────────────────────
 //  RENDER
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+//  PARSE NAV 이력
+// ─────────────────────────────────────────────
+function parseNav(table) {
+  if (!table || !table.rows) return [];
+  return table.rows.map(row => {
+    const raw = row.c?.[0];
+    const dateStr = raw?.f || (typeof raw?.v === 'string' ? raw.v : null);
+    return {
+      date: dateStr,
+      kospi: parseNum(cellVal(row, 1)),
+      nav: parseNum(cellVal(row, 5))
+    };
+  }).filter(r => r.date && r.nav > 0);
+}
+
+let navChartInstance = null;
+
+function renderNavChart(navData) {
+  const el = document.getElementById('navChart');
+  if (!el || !navData || navData.length === 0) return;
+
+  // Format dates as MM/DD, show every ~2 weeks
+  const labels = navData.map(r => {
+    const s = String(r.date);
+    const m = s.match(/(\d{4})[\/\-](\d{2})[\/\-](\d{2})/);
+    return m ? `${m[2]}/${m[3]}` : s;
+  });
+
+  const navValues = navData.map(r => r.nav);
+
+  // Normalize KOSPI to NAV start value for comparison
+  const kospiBase = navData[0].kospi || 1;
+  const navBase   = navData[0].nav   || 1;
+  const kospiNorm = navData.map(r => +(r.kospi / kospiBase * navBase).toFixed(2));
+
+  if (navChartInstance) navChartInstance.destroy();
+  navChartInstance = new Chart(el.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'ICOK 좌당금액',
+          data: navValues,
+          borderColor: '#c8a96e',
+          backgroundColor: 'rgba(200,169,110,0.10)',
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          tension: 0.3,
+          fill: true,
+          yAxisID: 'yNav'
+        },
+        {
+          label: 'KOSPI (정규화)',
+          data: kospiNorm,
+          borderColor: '#4fa3e0',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          tension: 0.3,
+          fill: false,
+          yAxisID: 'yNav'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          labels: {
+            color: '#6b7280',
+            font: { size: 11 },
+            boxWidth: 20,
+            padding: 16
+          }
+        },
+        tooltip: {
+          backgroundColor: '#1e2432',
+          titleColor: '#e8ecf4',
+          bodyColor: '#a0aec0',
+          borderColor: '#242936',
+          borderWidth: 1,
+          callbacks: {
+            label(ctx) {
+              return ` ${ctx.dataset.label}: ₩${Number(ctx.raw).toLocaleString()}`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#6b7280',
+            font: { size: 10 },
+            maxTicksLimit: 13,
+            maxRotation: 0
+          },
+          grid: { color: 'rgba(255,255,255,0.04)' }
+        },
+        yNav: {
+          ticks: {
+            color: '#6b7280',
+            font: { size: 10 },
+            callback: v => '₩' + Number(v).toLocaleString()
+          },
+          grid: { color: 'rgba(255,255,255,0.04)' }
+        }
+      }
+    }
+  });
+}
+
 let sectorChartInstance = null;
 
 function renderKPIs(d) {
@@ -1216,7 +1352,7 @@ function renderSectors(sectors) {
 function renderTx(transactions) {
   const tbody = document.getElementById('tx-tbody');
   if (!transactions.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--muted);">거래 기록 없음</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--muted);">거래 기록 없음</td></tr>';
     return;
   }
 
@@ -1228,7 +1364,6 @@ function renderTx(transactions) {
       <td style="text-align:left;" class="${t.type === '매수' ? 'tx-buy' : 'tx-sell'}">${t.type}</td>
       <td>${fmt.num(t.qty)}</td>
       <td>${t.price > 1000 ? fmt.krw(t.price) : fmt.usd(t.price)}</td>
-      <td>${t.price > 1000 ? fmt.krw(t.fee) : fmt.usd(t.fee)}</td>
       <td>${t.price > 1000 ? fmt.krw(t.total) : fmt.usd(t.total)}</td>
       <td style="text-align:left;color:var(--muted);">${t.memo || '—'}</td>
     </tr>
@@ -1260,21 +1395,24 @@ async function loadData() {
   }
 
   try {
-    const [portTable, sectorTable, txTable] = await Promise.all([
+    const [portTable, sectorTable, txTable, navTable] = await Promise.all([
       fetchSheet('Portfolio'),
       fetchSheet('Sector Summary'),
       fetchSheet('Transaction Log'),
+      fetchSheet('NAV 이력'),
     ]);
 
     const portData   = parsePortfolio(portTable);
     const sectors    = parseSectors(sectorTable);
     const txData     = parseTx(txTable);
+    const navData    = parseNav(navTable);
     const computed   = computeFromSample(portData); // compute totals
 
     // Override sectors with live data if available
     const liveSectors = sectors.length ? sectors : computed.sectors;
 
     renderKPIs(computed);
+    renderNavChart(navData);
     renderKrTable(computed.krStocks, computed.totalAum);
     renderUsTable(computed.usStocks, computed.fx, computed.totalAum);
     renderSectors(liveSectors);
