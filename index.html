@@ -107,6 +107,12 @@
     border: 1px solid rgba(200,169,110,0.3);
   }
 
+  .badge-warn {
+    background: rgba(255,180,60,0.15);
+    color: #ffb43c;
+    border: 1px solid rgba(255,180,60,0.3);
+  }
+
   .dot {
     width: 6px;
     height: 6px;
@@ -1395,20 +1401,23 @@ async function loadData() {
   }
 
   try {
-    const [portTable, sectorTable, txTable, navTable] = await Promise.all([
+    // ── 핵심 시트(Portfolio, Transaction Log)는 필수, 나머지는 실패해도 계속 진행
+    const [portRes, sectorRes, txRes, navRes] = await Promise.allSettled([
       fetchSheet('Portfolio'),
       fetchSheet('Sector Summary'),
       fetchSheet('Transaction Log'),
       fetchSheet('NAV 이력'),
     ]);
 
-    const portData   = parsePortfolio(portTable);
-    const sectors    = parseSectors(sectorTable);
-    const txData     = parseTx(txTable);
-    const navData    = parseNav(navTable);
-    const computed   = computeFromSample(portData); // compute totals
+    // Portfolio는 필수 — 실패하면 전체 샘플로 fallback
+    if (portRes.status === 'rejected') throw portRes.reason;
 
-    // Override sectors with live data if available
+    const portData = parsePortfolio(portRes.value);
+    const sectors  = sectorRes.status === 'fulfilled' ? parseSectors(sectorRes.value) : [];
+    const txData   = txRes.status    === 'fulfilled' ? parseTx(txRes.value)           : [];
+    const navData  = navRes.status   === 'fulfilled' ? parseNav(navRes.value)         : [];
+
+    const computed    = computeFromSample(portData);
     const liveSectors = sectors.length ? sectors : computed.sectors;
 
     renderKPIs(computed);
@@ -1418,8 +1427,21 @@ async function loadData() {
     renderSectors(liveSectors);
     renderTx(txData.length ? txData : SAMPLE.transactions);
 
+    // 일부 시트 실패 시 경고 표시
+    const failedSheets = [
+      sectorRes.status === 'rejected' ? 'Sector Summary' : null,
+      txRes.status     === 'rejected' ? 'Transaction Log' : null,
+      navRes.status    === 'rejected' ? 'NAV 이력' : null,
+    ].filter(Boolean);
+
+    if (failedSheets.length) {
+      console.warn('일부 시트 로드 실패:', failedSheets);
+      setStatus('warn', `라이브 (${failedSheets.join(', ')} 누락)`);
+    } else {
+      setStatus('live', '라이브 데이터');
+    }
+
     document.getElementById('error-banner').style.display = 'none';
-    setStatus('live', '라이브 데이터');
     setUpdateTime();
     document.getElementById('config-panel').style.display = 'none';
 
